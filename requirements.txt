@@ -1,0 +1,9 @@
+python-dotenv>=1.0.0,<2.0.0
+apache-airflow[postgres,oracle]>=2.8.1,<3.0.0
+apache-airflow-providers-postgres>=5.6.0,<6.0.0
+psycopg[binary]>=3.1.10,<4.0.0
+oracledb==2.0.0
+pyspark==3.5.5
+fastapi>=0.110.0,<1.0.0
+uvicorn>=0.29.0,<1.0.0
+cx_Oracle>=8.3.0,<9.0.0 

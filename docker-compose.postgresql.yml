@@ -1,0 +1,229 @@
+services:
+  # PostgreSQL para Airflow (siempre presente)
+  sire-postgres:
+    image: postgres:13
+    container_name: sire-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - sire-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL para Data Warehouse (destino de datos)
+  sire-postgres-dw:
+    image: postgres:13
+    container_name: sire-postgres-dw
+    environment:
+      POSTGRES_USER: sire_user
+      POSTGRES_PASSWORD: sire_password
+      POSTGRES_DB: sire_dw
+    volumes:
+      - postgres_dw_data:/var/lib/postgresql/data
+      - ./scripts_sql/postgres/create_schemas.sql:/docker-entrypoint-initdb.d/01_create_schemas.sql
+      - ./scripts_sql/postgres/sire_dv_tables.sql:/docker-entrypoint-initdb.d/02_sire_dv_tables.sql
+      - ./scripts_sql/postgres/sire_sta_tables.sql:/docker-entrypoint-initdb.d/03_sire_sta_tables.sql
+    ports:
+      - "5433:5432"
+    networks:
+      - sire-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sire_user -d sire_dw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sire-airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: custom-airflow:2.9.1
+    container_name: sire-airflow-init
+    depends_on:
+      sire-postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=y90z8bKQ4DvpB5qcZEWSB_Th9Cqd91z5oLmfsIOVvag=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE=5
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW=10
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE=3600
+      - PYTHONPATH=/opt/airflow/dags:/opt/airflow/src
+      - ENV_FILE=/opt/airflow/config/dev.postgresql.env
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./config/dev.postgresql.env:/opt/airflow/config/dev.postgresql.env
+    entrypoint: >
+      bash -c "
+        echo 'Esperando a que PostgreSQL esté disponible...' &&
+        for i in {1..30}; do
+          if pg_isready -h sire-postgres -U airflow; then
+            echo '✅ PostgreSQL está disponible.' &&
+            break
+          else
+            echo '🔄 Intento $i/30: PostgreSQL no está listo aún. Reintentando en 10 segundos...' &&
+            sleep 10
+          fi
+        done &&
+        echo 'Inicializando base de datos de Airflow...' &&
+        airflow db upgrade &&
+        echo 'Creando usuario administrador...' &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@admin.com --password admin
+      "
+    networks:
+      - sire-net
+
+  sire-airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: custom-airflow:2.9.1
+    container_name: sire-airflow-webserver
+    restart: always
+    depends_on:
+      sire-airflow-init:
+        condition: service_started
+      sire-postgres-dw:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+
+      - AIRFLOW__CORE__PYTHONPATH=/opt/airflow/dags:/opt/airflow/src:/opt/airflow/plugins
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__WEBSERVER__RBAC=True
+      - AIRFLOW__CORE__FERNET_KEY=y90z8bKQ4DvpB5qcZEWSB_Th9Cqd91z5oLmfsIOVvag=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE=5
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW=10
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE=3600
+      - PIP_ADDITIONAL_REQUIREMENTS=pyspark
+      - ENV_FILE=/opt/airflow/config/dev.postgresql.env
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./src/data:/data
+
+
+      - ./config/dev.postgresql.env:/opt/airflow/config/dev.postgresql.env
+    ports:
+      - "8080:8080"
+    command: webserver
+    networks:
+      - sire-net
+
+  sire-airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: custom-airflow:2.9.1
+    container_name: sire-airflow-scheduler
+    restart: always
+    depends_on:
+      - sire-airflow-webserver
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=y90z8bKQ4DvpB5qcZEWSB_Th9Cqd91z5oLmfsIOVvag=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE=5
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW=10
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE=3600
+      - PYTHONPATH=/opt/airflow/dags:/opt/airflow/src
+      - ENV_FILE=/opt/airflow/config/dev.postgresql.env
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./src/data:/data
+
+
+      - ./config/dev.postgresql.env:/opt/airflow/config/dev.postgresql.env
+    command: scheduler
+    networks:
+      - sire-net
+
+  sire-spark-master:
+    image: bitnami/spark:3.5.5
+    container_name: sire-spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "7077:7077"
+      - "8081:8080"
+    networks:
+      - sire-net
+    volumes:
+      - ./src/data:/data
+
+  sire-spark-worker:
+    image: bitnami/spark:3.5.5
+    container_name: sire-spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://sire-spark-master:7077
+      - SPARK_WORKER_MEMORY=12G
+      - SPARK_WORKER_CORES=12
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    depends_on:
+      - sire-spark-master
+    ports:
+      - "8082:8081"
+    networks:
+      - sire-net
+    volumes:
+      - ./src/data:/data
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi
+    container_name: sire-fastapi
+    depends_on:
+      sire-postgres-dw:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    networks:
+      - sire-net
+    environment:
+      - POSTGRES_HOST=sire-postgres-dw
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=sire_user
+      - POSTGRES_PASSWORD=sire_password
+      - POSTGRES_DATABASE=sire_dw
+      - ENV_FILE=/opt/airflow/config/dev.postgresql.env
+    volumes:
+      - ./config/dev.postgresql.env:/opt/airflow/config/dev.postgresql.env
+      - ./FastAPI:/app/FastAPI
+      - ./src:/app/src
+
+networks:
+  sire-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  postgres_dw_data:

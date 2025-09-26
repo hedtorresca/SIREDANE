@@ -1,0 +1,171 @@
+version: '3.8'
+
+services:
+  # PostgreSQL para Airflow (metadatos)
+  sire-postgres:
+    image: postgres:13
+    container_name: sire-postgres-prod
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - sire-network
+    restart: unless-stopped
+
+  # FastAPI para Oracle Producción
+  sire-fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi.oracle
+    container_name: sire-fastapi-prod
+    environment:
+      - ENVIRONMENT=prod
+      - DATABASE_TYPE=oracle
+      - PROD_ORACLE_HOST=10.168.48.79
+      - PROD_ORACLE_PORT=1522
+      - PROD_ORACLE_SERVICE=dbkactus
+      - PROD_ORACLE_JDBC_USER=RRAA_DWH
+      - PROD_ORACLE_JDBC_PASSWORD=D4n3.rR3E*202S
+      - PROD_ORACLE_CONNECTION_STRING=oracle://RRAA_DWH:D4n3.rR3E*202S@10.168.48.79:1522/dbkactus
+      - ORACLE_SCHEMA_STA=RRAA_DWH
+      - ORACLE_SCHEMA_DV=RRAA_DWH
+    ports:
+      - "5003:5003"
+    networks:
+      - sire-network
+    depends_on:
+      - sire-postgres
+    restart: unless-stopped
+    volumes:
+      - ./config/prod.oracle.env:/app/.env
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Airflow Webserver
+  sire-airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: sire-airflow-webserver-prod
+    command: >
+      bash -c "
+        airflow db init &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
+        airflow webserver --port 8080
+      "
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__PLUGINS_FOLDER=/opt/airflow/plugins
+      - AIRFLOW__CORE__AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=America/Bogota
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      - AIRFLOW__WEBSERVER__SECRET_KEY=your-secret-key-here
+      - AIRFLOW__API__AUTH_BACKEND=airflow.api.auth.backend.basic_auth
+      - ENVIRONMENT=prod
+      - DATABASE_TYPE=oracle
+      - PROD_ORACLE_HOST=10.168.48.79
+      - PROD_ORACLE_PORT=1522
+      - PROD_ORACLE_SERVICE=dbkactus
+      - PROD_ORACLE_JDBC_USER=RRAA_DWH
+      - PROD_ORACLE_JDBC_PASSWORD=D4n3.rR3E*202S
+      - PROD_ORACLE_DWH_JDBC_USER=RRAA_DWH
+      - PROD_ORACLE_DWH_JDBC_PASSWORD=D4n3.rR3E*202S
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./config/prod.oracle.env:/opt/airflow/.env
+      - airflow_logs:/opt/airflow/logs
+    ports:
+      - "8080:8080"
+    networks:
+      - sire-network
+    depends_on:
+      - sire-postgres
+      - sire-fastapi
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Airflow Scheduler
+  sire-airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: sire-airflow-scheduler-prod
+    command: airflow scheduler
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__PLUGINS_FOLDER=/opt/airflow/plugins
+      - AIRFLOW__CORE__AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=America/Bogota
+      - ENVIRONMENT=prod
+      - DATABASE_TYPE=oracle
+      - PROD_ORACLE_HOST=10.168.48.79
+      - PROD_ORACLE_PORT=1522
+      - PROD_ORACLE_SERVICE=dbkactus
+      - PROD_ORACLE_JDBC_USER=RRAA_DWH
+      - PROD_ORACLE_JDBC_PASSWORD=D4n3.rR3E*202S
+      - PROD_ORACLE_DWH_JDBC_USER=RRAA_DWH
+      - PROD_ORACLE_DWH_JDBC_PASSWORD=D4n3.rR3E*202S
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./config/prod.oracle.env:/opt/airflow/.env
+      - airflow_logs:/opt/airflow/logs
+    networks:
+      - sire-network
+    depends_on:
+      - sire-postgres
+      - sire-fastapi
+    restart: unless-stopped
+
+  # Script de inicialización de base de datos
+  sire-db-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi.oracle
+    container_name: sire-db-init-prod
+    command: python scripts_oracle/setup_oracle_prod.py
+    environment:
+      - ENVIRONMENT=prod
+      - DATABASE_TYPE=oracle
+      - PROD_ORACLE_HOST=10.168.48.79
+      - PROD_ORACLE_PORT=1522
+      - PROD_ORACLE_SERVICE=dbkactus
+      - PROD_ORACLE_JDBC_USER=RRAA_DWH
+      - PROD_ORACLE_JDBC_PASSWORD=D4n3.rR3E*202S
+    networks:
+      - sire-network
+    depends_on:
+      - sire-postgres
+    restart: "no"
+
+volumes:
+  postgres_data:
+    driver: local
+  airflow_logs:
+    driver: local
+
+networks:
+  sire-network:
+    driver: bridge

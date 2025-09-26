@@ -1,0 +1,31 @@
+FROM apache/airflow:2.9.1
+
+USER root
+
+# Instalar dependencias necesarias
+RUN apt-get update && \
+    apt-get install -y openjdk-17-jdk gcc unzip wget dos2unix && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Configurar Java
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+USER airflow
+
+# Instalar dependencias Python
+COPY requirements.txt ./
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt
+
+# Configurar variables de entorno
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+# Crear directorio para archivos de configuración
+RUN mkdir -p /opt/airflow/config
+
+# Copiar archivos de configuración
+COPY config/ /opt/airflow/config/
+
+# Cargar variables de entorno desde archivo .env si existe
+RUN echo 'if [ -f /opt/airflow/config/*.env ]; then set -a; source /opt/airflow/config/*.env; set +a; fi' >> /opt/airflow/.bashrc

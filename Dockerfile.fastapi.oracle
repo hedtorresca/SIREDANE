@@ -1,0 +1,57 @@
+FROM python:3.9-slim-bullseye
+
+  # Configurar variables de entorno para evitar problemas de tiempo
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Instalar dependencias del sistema para Oracle
+RUN apt-get update --allow-releaseinfo-change --allow-unauthenticated && \
+    apt-get install -y --no-install-recommends \
+    wget \
+    unzip \
+    libaio1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Descargar e instalar Oracle Instant Client
+RUN mkdir -p /opt/oracle
+WORKDIR /opt/oracle
+
+# Descargar Oracle Instant Client Basic y SDK
+RUN wget https://download.oracle.com/otn_software/linux/instantclient/2112000/instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
+    && wget https://download.oracle.com/otn_software/linux/instantclient/2112000/instantclient-sdk-linux.x64-21.12.0.0.0dbru.zip \
+    && unzip instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
+    && unzip instantclient-sdk-linux.x64-21.12.0.0.0dbru.zip \
+    && rm instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
+    && rm instantclient-sdk-linux.x64-21.12.0.0.0dbru.zip
+
+# Configurar variables de entorno para Oracle
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient_21_12
+ENV PATH=/opt/oracle/instantclient_21_12:$PATH
+ENV ORACLE_HOME=/opt/oracle/instantclient_21_12
+
+# Crear directorio de trabajo
+WORKDIR /app
+
+# Copiar requirements
+COPY requirements.txt .
+
+# Instalar dependencias de Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Instalar cx_Oracle específicamente
+RUN pip install cx_Oracle
+
+# Copiar código de la aplicación
+COPY FastAPI/ ./FastAPI/
+COPY src/ ./src/
+COPY scripts_oracle/ ./scripts_oracle/
+
+# Crear directorio para datos
+RUN mkdir -p /app/data
+
+# Exponer puerto
+EXPOSE 5003
+
+# Comando para ejecutar la aplicación Oracle
+CMD ["python", "-m", "uvicorn", "FastAPI.Main_oracle:app", "--host", "0.0.0.0", "--port", "5003"]

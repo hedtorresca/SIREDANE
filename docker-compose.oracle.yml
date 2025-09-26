@@ -1,0 +1,224 @@
+services:
+  # PostgreSQL para Airflow (siempre presente)
+  sire-postgres:
+    image: postgres:13
+    container_name: sire-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - sire-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Oracle para Data Warehouse (destino de datos)
+  oracle-db:
+    image: container-registry.oracle.com/database/express:21.3.0-xe
+    container_name: oracle-db
+    ports:
+      - "1521:1521"
+    environment:
+      ORACLE_PWD: sire_password
+    networks:
+      - sire-net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo 'exit' | sqlplus -L SYSTEM/sire_password@XE || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - ./scripts_sql/oracle/init_minimal.sql:/docker-entrypoint-initdb.d/01_init_minimal.sql
+
+  sire-airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: custom-airflow:2.9.1
+    container_name: sire-airflow-init
+    depends_on:
+      sire-postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=y90z8bKQ4DvpB5qcZEWSB_Th9Cqd91z5oLmfsIOVvag=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE=5
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW=10
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE=3600
+      - PYTHONPATH=/opt/airflow/dags:/opt/airflow/src:/opt/airflow/plugins
+      - ENV_FILE=/opt/airflow/config/dev.oracle.env
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./plugins:/opt/airflow/plugins
+      - ./airflow.cfg:/opt/airflow/airflow.cfg
+      - ./config/dev.oracle.env:/opt/airflow/config/dev.oracle.env
+    entrypoint: >
+      bash -c "
+        echo 'Esperando a que PostgreSQL esté disponible...' &&
+        for i in {1..30}; do
+          if pg_isready -h sire-postgres -U airflow; then
+            echo '✅ PostgreSQL está disponible.' &&
+            break
+          else
+            echo '🔄 Intento $i/30: PostgreSQL no está listo aún. Reintentando en 10 segundos...' &&
+            sleep 10
+          fi
+        done &&
+        echo 'Inicializando base de datos de Airflow...' &&
+        airflow db upgrade &&
+        echo 'Creando usuario administrador...' &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@admin.com --password admin
+      "
+    networks:
+      - sire-net
+
+  sire-airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: custom-airflow:2.9.1
+    container_name: sire-airflow-webserver
+    restart: always
+    depends_on:
+      - sire-airflow-init
+      - oracle-db:
+          condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__PLUGINS_FOLDER=/opt/airflow/plugins
+      - AIRFLOW__CORE__PYTHONPATH=/opt/airflow/dags:/opt/airflow/src:/opt/airflow/plugins
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__WEBSERVER__RBAC=True
+      - AIRFLOW__CORE__FERNET_KEY=y90z8bKQ4DvpB5qcZEWSB_Th9Cqd91z5oLmfsIOVvag=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE=5
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW=10
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE=3600
+      - PIP_ADDITIONAL_REQUIREMENTS=pyspark
+      - ENV_FILE=/opt/airflow/config/dev.oracle.env
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./src/data:/data
+      - ./plugins:/opt/airflow/plugins
+      - ./airflow.cfg:/opt/airflow/airflow.cfg
+      - ./config/dev.oracle.env:/opt/airflow/config/dev.oracle.env
+    ports:
+      - "8080:8080"
+    command: webserver
+    networks:
+      - sire-net
+
+  sire-airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: custom-airflow:2.9.1
+    container_name: sire-airflow-scheduler
+    restart: always
+    depends_on:
+      - sire-airflow-webserver
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@sire-postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=y90z8bKQ4DvpB5qcZEWSB_Th9Cqd91z5oLmfsIOVvag=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE=5
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW=10
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE=3600
+      - PYTHONPATH=/opt/airflow/dags:/opt/airflow/src:/opt/airflow/plugins
+      - ENV_FILE=/opt/airflow/config/dev.oracle.env
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./src/data:/data
+      - ./plugins:/opt/airflow/plugins
+      - ./airflow.cfg:/opt/airflow/airflow.cfg
+      - ./config/dev.oracle.env:/opt/airflow/config/dev.oracle.env
+    command: scheduler
+    networks:
+      - sire-net
+
+  sire-spark-master:
+    image: bitnami/spark:3.5.5
+    container_name: sire-spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "7077:7077"
+      - "8081:8080"
+    networks:
+      - sire-net
+    volumes:
+      - ./src/data:/data
+
+  sire-spark-worker:
+    image: bitnami/spark:3.5.5
+    container_name: sire-spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://sire-spark-master:7077
+      - SPARK_WORKER_MEMORY=12G
+      - SPARK_WORKER_CORES=12
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    depends_on:
+      - sire-spark-master
+    ports:
+      - "8082:8081"
+    networks:
+      - sire-net
+    volumes:
+      - ./src/data:/data
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi
+    container_name: sire-fastapi
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    networks:
+      - sire-net
+    environment:
+      - ORACLE_HOST=oracle-db
+      - ORACLE_PORT=1521
+      - ORACLE_USER=SIRE_STG
+      - ORACLE_PASSWORD=sire_password
+      - ORACLE_DATABASE=XEPDB1
+      - ENV_FILE=/opt/airflow/config/dev.oracle.env
+    volumes:
+      - ./config/dev.oracle.env:/opt/airflow/config/dev.oracle.env
+      - ./FastAPI:/app/FastAPI
+      - ./src:/app/src
+
+networks:
+  sire-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
