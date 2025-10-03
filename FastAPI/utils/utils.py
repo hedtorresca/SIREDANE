@@ -1,7 +1,7 @@
 import psycopg2
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from difflib import SequenceMatcher
 from sqlalchemy import create_engine, text
 
@@ -145,6 +145,29 @@ def _similitud_nombres(nombre_a: str, nombre_b: str) -> float:
     return SequenceMatcher(None, nombre_a, nombre_b).ratio()
 
 
+def _obtener_bloques_documento(numero_documento: Optional[str]) -> Dict[str, Any]:
+    numero = "" if numero_documento is None else str(numero_documento).strip()
+
+    longitud = len(numero)
+    bloques: Dict[str, Any] = {
+        "numero": numero,
+        "longitud": longitud,
+        "prefijo": numero[:2] if longitud >= 2 else None,
+        "sufijo": numero[-2:] if longitud >= 2 else None,
+        "posiciones": []  # Posiciones (1-indexadas) para revisar coincidencias puntuales
+    }
+
+    if longitud > 1:
+        posiciones: List[int] = [1, longitud]
+        if longitud > 2:
+            posiciones.append((longitud // 2) + 1)
+            if longitud % 2 == 0:
+                posiciones.append(longitud // 2)
+        bloques["posiciones"] = sorted(set(posiciones))
+
+    return bloques
+
+
 def buscar_persona_existente(
     tipo_documento: str,
     numero_documento: str,
@@ -195,24 +218,55 @@ def buscar_persona_existente(
         if not nombre_solicitud:
             return None
 
-        candidatos = conn.execute(
-            text(
-                """
-                SELECT c.id_estadistico,
-                       c.numero_documento,
-                       COALESCE(p.primer_nombre, '') AS primer_nombre,
-                       COALESCE(p.segundo_nombre, '') AS segundo_nombre,
-                       COALESCE(p.primer_apellido, '') AS primer_apellido,
-                       COALESCE(p.segundo_apellido, '') AS segundo_apellido
-                FROM sire_sta.control_ids_generados c
-                LEFT JOIN sire_sta.raw_obt_personas p
-                  ON c.id_estadistico = p.id_estadistico
-                WHERE c.tipo_entidad = '01'
-                  AND c.tipo_documento = :tipo_doc
+        bloques = _obtener_bloques_documento(numero_documento)
+
+        consulta_bloque = [
+            "c.tipo_entidad = '01'",
+            "c.tipo_documento = :tipo_doc",
+            "ABS(CHAR_LENGTH(c.numero_documento) - :len_doc) <= 1",
+        ]
+
+        parametros: Dict[str, Any] = {
+            "tipo_doc": tipo_documento,
+            "len_doc": bloques["longitud"],
+        }
+
+        condiciones_or: List[str] = []
+
+        if bloques["prefijo"]:
+            parametros["prefijo"] = bloques["prefijo"]
+            condiciones_or.append("LEFT(c.numero_documento, 2) = :prefijo")
+
+        if bloques["sufijo"]:
+            parametros["sufijo"] = bloques["sufijo"]
+            condiciones_or.append("RIGHT(c.numero_documento, 2) = :sufijo")
+
+        for idx, posicion in enumerate(bloques["posiciones"]):
+            parametros[f"pos_{idx}"] = posicion
+            parametros[f"char_{idx}"] = bloques["numero"][posicion - 1]
+            condiciones_or.append(
+                f"SUBSTRING(c.numero_documento FROM :pos_{idx} FOR 1) = :char_{idx}"
+            )
+
+        if condiciones_or:
+            consulta_bloque.append("(" + " OR ".join(condiciones_or) + ")")
+
+        consulta = text(
+            f"""
+            SELECT c.id_estadistico,
+                   c.numero_documento,
+                   COALESCE(p.primer_nombre, '') AS primer_nombre,
+                   COALESCE(p.segundo_nombre, '') AS segundo_nombre,
+                   COALESCE(p.primer_apellido, '') AS primer_apellido,
+                   COALESCE(p.segundo_apellido, '') AS segundo_apellido
+            FROM sire_sta.control_ids_generados c
+            LEFT JOIN sire_sta.raw_obt_personas p
+              ON c.id_estadistico = p.id_estadistico
+            WHERE {'\n              AND '.join(consulta_bloque)}
             """
-            ),
-            {"tipo_doc": tipo_documento},
         )
+
+        candidatos = conn.execute(consulta, parametros)
 
         mejor_coincidencia: Optional[Dict[str, Any]] = None
         mejor_puntaje = 0.0

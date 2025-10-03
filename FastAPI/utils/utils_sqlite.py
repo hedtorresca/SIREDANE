@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -197,6 +197,29 @@ def _similitud_nombres(nombre_a: str, nombre_b: str) -> float:
     return SequenceMatcher(None, nombre_a, nombre_b).ratio()
 
 
+def _obtener_bloques_documento(numero_documento: Optional[str]) -> Dict[str, Any]:
+    numero = "" if numero_documento is None else str(numero_documento).strip()
+
+    longitud = len(numero)
+    bloques: Dict[str, Any] = {
+        "numero": numero,
+        "longitud": longitud,
+        "prefijo": numero[:2] if longitud >= 2 else None,
+        "sufijo": numero[-2:] if longitud >= 2 else None,
+        "posiciones": []
+    }
+
+    if longitud > 1:
+        posiciones: List[int] = [1, longitud]
+        if longitud > 2:
+            posiciones.append((longitud // 2) + 1)
+            if longitud % 2 == 0:
+                posiciones.append(longitud // 2)
+        bloques["posiciones"] = sorted(set(posiciones))
+
+    return bloques
+
+
 def buscar_persona_existente(
     tipo_documento: str,
     numero_documento: str,
@@ -245,8 +268,33 @@ def buscar_persona_existente(
         conn.close()
         return None
 
-    cur.execute(
-        """
+    bloques = _obtener_bloques_documento(numero_documento)
+
+    condiciones = [
+        "tipo_documento = ?",
+        "ABS(LENGTH(numero_documento) - ?) <= 1",
+    ]
+
+    parametros = [tipo_documento, bloques["longitud"]]
+
+    condiciones_or: List[str] = []
+
+    if bloques["prefijo"]:
+        condiciones_or.append("SUBSTR(numero_documento, 1, 2) = ?")
+        parametros.append(bloques["prefijo"])
+
+    if bloques["sufijo"]:
+        condiciones_or.append("SUBSTR(numero_documento, -2, 2) = ?")
+        parametros.append(bloques["sufijo"])
+
+    for posicion in bloques["posiciones"]:
+        condiciones_or.append("SUBSTR(numero_documento, ?, 1) = ?")
+        parametros.extend([posicion, bloques["numero"][posicion - 1]])
+
+    if condiciones_or:
+        condiciones.append("(" + " OR ".join(condiciones_or) + ")")
+
+    consulta = f"""
         SELECT id_estadistico,
                numero_documento,
                COALESCE(primer_nombre, ''),
@@ -254,10 +302,10 @@ def buscar_persona_existente(
                COALESCE(primer_apellido, ''),
                COALESCE(segundo_apellido, '')
         FROM raw_obt_personas
-        WHERE tipo_documento = ?
-    """,
-        [tipo_documento],
-    )
+        WHERE {' AND '.join(condiciones)}
+    """
+
+    cur.execute(consulta, parametros)
 
     mejor_coincidencia: Optional[Dict[str, Any]] = None
     mejor_puntaje = 0.0

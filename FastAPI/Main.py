@@ -137,8 +137,8 @@ def generar_id_empresas_cc(request: EmpresaCCRequest):
         )
 
         if id_persona_existente:
-            id_persona_estadistico = id_persona_existente["id_estadistico"]
             coincidencia = id_persona_existente.get("coincidencia")
+            id_persona_existente = id_persona_existente["id_estadistico"]
             # La persona existe, usar su ID para la empresa
             data_empresa = {
                 "razon_social": request.razon_social,
@@ -165,13 +165,13 @@ def generar_id_empresas_cc(request: EmpresaCCRequest):
                 "fecha_actualizacion": request.fecha_actualizacion
             }
             
-            guardar_empresa_con_id_persona(data_empresa, id_persona_estadistico)
+            guardar_empresa_con_id_persona(data_empresa, id_persona_existente)
 
             return IDResponse(
                 id_estadistico=id_persona_estadistico,
                 mensaje="Empresa registrada usando ID de persona existente",
                 tipo_entidad="01",
-                consecutivo=id_persona_estadistico[2:],
+                consecutivo=id_persona_existente[2:],
                 coincidencia=coincidencia,
             )
         else:
