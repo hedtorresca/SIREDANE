@@ -1,5 +1,5 @@
 from pydantic import BaseModel, validator, Field
-from typing import Optional
+from typing import Optional, Union, Literal
 import datetime
 
 # PENMDIENTE - ACTUALIZACIÓN DE DATOS EN LA BASE DE DATOS CUANDO CAMBIAN. AGREGAR PARAMETRO DE ES_FUENTE_CONFIABLE QUE PERMITA SABER A LA API SI REQUIERE O NO
@@ -201,3 +201,32 @@ class IDResponse(BaseModel):
     mensaje: str
     tipo_entidad: str
     consecutivo: str
+    coincidencia: Optional["CoincidenciaResponse"] = None
+
+
+class EvidenciaDocExacto(BaseModel):
+    tipo_documento: str
+    numero_documento: str
+
+
+class EvidenciaDoc1DigNombre(BaseModel):
+    doc_diff_1dig: bool
+    sim_nombre: float = Field(ge=0.0, le=1.0)
+
+
+class CoincidenciaResponse(BaseModel):
+    criterio: Literal["C1_DOC_EXACTO", "C2_DOC_1DIG_NOMBRE_SIM"]
+    puntaje: float = Field(ge=0.0, le=1.0)
+    evidencia: Union[EvidenciaDocExacto, EvidenciaDoc1DigNombre]
+
+    @validator("puntaje")
+    def validar_puntaje_por_criterio(cls, puntaje: float, values):
+        criterio = values.get("criterio")
+        if criterio == "C1_DOC_EXACTO" and puntaje != 1.0:
+            raise ValueError("El criterio C1_DOC_EXACTO debe tener puntaje 1.0")
+        if criterio == "C2_DOC_1DIG_NOMBRE_SIM" and not (0.90 <= puntaje <= 1.0):
+            raise ValueError("El criterio C2_DOC_1DIG_NOMBRE_SIM debe tener puntaje entre 0.90 y 1.0")
+        return puntaje
+
+
+IDResponse.update_forward_refs()

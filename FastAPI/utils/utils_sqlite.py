@@ -1,7 +1,8 @@
 import sqlite3
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 from datetime import datetime
+from difflib import SequenceMatcher
 
 def get_sqlite_connection():
     """Establece conexión con SQLite"""
@@ -104,41 +105,192 @@ def obtener_siguiente_consecutivo_empresas() -> str:
     """Obtiene el siguiente consecutivo hexadecimal para empresas"""
     conn = get_sqlite_connection()
     cur = conn.cursor()
-    
+
     # Buscar el máximo ID estadístico de empresas (que empieza con '02')
     cur.execute("""
         SELECT MAX(CAST(SUBSTR(id_estadistico, 3) AS INTEGER))
-        FROM raw_obt_empresas 
+        FROM raw_obt_empresas
         WHERE id_estadistico LIKE '02%'
     """)
-    
+
     max_consecutivo = cur.fetchone()[0]
     cur.close()
     conn.close()
-    
+
     if max_consecutivo is None:
         return "00000001"
-    
+
     # Incrementar y convertir a hexadecimal de 8 dígitos
     siguiente = max_consecutivo + 1
     return f"{siguiente:08X}"
 
-def buscar_persona_existente(tipo_documento: str, numero_documento: str) -> Optional[str]:
-    """Busca si una persona ya existe en la base de datos"""
+
+def _normalizar_cadena(valor: Optional[str]) -> str:
+    if valor is None:
+        return ""
+    return " ".join(str(valor).strip().upper().split())
+
+
+def _construir_nombre_completo(
+    primer_nombre: Optional[str],
+    segundo_nombre: Optional[str],
+    primer_apellido: Optional[str],
+    segundo_apellido: Optional[str],
+) -> str:
+    partes = [
+        _normalizar_cadena(primer_nombre),
+        _normalizar_cadena(segundo_nombre),
+        _normalizar_cadena(primer_apellido),
+        _normalizar_cadena(segundo_apellido),
+    ]
+    return " ".join([parte for parte in partes if parte])
+
+
+def _doc_diff_una_operacion(doc_a: str, doc_b: str) -> bool:
+    if doc_a is None or doc_b is None:
+        return False
+
+    if doc_a == doc_b:
+        return False
+
+    doc_a = doc_a.strip()
+    doc_b = doc_b.strip()
+
+    len_a = len(doc_a)
+    len_b = len(doc_b)
+
+    if abs(len_a - len_b) > 1:
+        return False
+
+    if len_a == len_b:
+        diferencias = [i for i in range(len_a) if doc_a[i] != doc_b[i]]
+        if len(diferencias) == 1:
+            return True
+        if len(diferencias) == 2:
+            i, j = diferencias
+            return j == i + 1 and doc_a[i] == doc_b[j] and doc_a[j] == doc_b[i]
+        return False
+
+    if len_a > len_b:
+        largo, corto = doc_a, doc_b
+    else:
+        largo, corto = doc_b, doc_a
+
+    i = j = 0
+    diferencia_encontrada = False
+    while i < len(largo) and j < len(corto):
+        if largo[i] != corto[j]:
+            if diferencia_encontrada:
+                return False
+            diferencia_encontrada = True
+            i += 1
+        else:
+            i += 1
+            j += 1
+
+    return True
+
+
+def _similitud_nombres(nombre_a: str, nombre_b: str) -> float:
+    if not nombre_a or not nombre_b:
+        return 0.0
+    return SequenceMatcher(None, nombre_a, nombre_b).ratio()
+
+
+def buscar_persona_existente(
+    tipo_documento: str,
+    numero_documento: str,
+    primer_nombre: Optional[str] = None,
+    segundo_nombre: Optional[str] = None,
+    primer_apellido: Optional[str] = None,
+    segundo_apellido: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Busca si una persona ya existe en la base de datos siguiendo los criterios de cruce C1 y C2."""
+
     conn = get_sqlite_connection()
     cur = conn.cursor()
-    
-    cur.execute("""
-        SELECT id_estadistico 
-        FROM raw_obt_personas 
+
+    # Criterio C1 — DOC_EXACTO
+    cur.execute(
+        """
+        SELECT id_estadistico
+        FROM raw_obt_personas
         WHERE tipo_documento = ? AND numero_documento = ?
-    """, [tipo_documento, numero_documento])
-    
+    """,
+        [tipo_documento, numero_documento],
+    )
+
     result = cur.fetchone()
+    if result:
+        cur.close()
+        conn.close()
+        return {
+            "id_estadistico": result[0],
+            "coincidencia": {
+                "criterio": "C1_DOC_EXACTO",
+                "puntaje": 1.0,
+                "evidencia": {
+                    "tipo_documento": tipo_documento,
+                    "numero_documento": numero_documento,
+                },
+            },
+        }
+
+    nombre_solicitud = _construir_nombre_completo(
+        primer_nombre, segundo_nombre, primer_apellido, segundo_apellido
+    )
+
+    if not nombre_solicitud:
+        cur.close()
+        conn.close()
+        return None
+
+    cur.execute(
+        """
+        SELECT id_estadistico,
+               numero_documento,
+               COALESCE(primer_nombre, ''),
+               COALESCE(segundo_nombre, ''),
+               COALESCE(primer_apellido, ''),
+               COALESCE(segundo_apellido, '')
+        FROM raw_obt_personas
+        WHERE tipo_documento = ?
+    """,
+        [tipo_documento],
+    )
+
+    mejor_coincidencia: Optional[Dict[str, Any]] = None
+    mejor_puntaje = 0.0
+
+    for row in cur.fetchall():
+        numero_doc_cand = row[1]
+        if not _doc_diff_una_operacion(str(numero_doc_cand or ""), str(numero_documento or "")):
+            continue
+
+        nombre_candidato = _construir_nombre_completo(row[2], row[3], row[4], row[5])
+        sim_nombre = _similitud_nombres(nombre_solicitud, nombre_candidato)
+        if sim_nombre < 0.90:
+            continue
+
+        puntaje = 0.90 + 0.10 * sim_nombre
+        if puntaje > mejor_puntaje:
+            mejor_puntaje = puntaje
+            mejor_coincidencia = {
+                "id_estadistico": row[0],
+                "coincidencia": {
+                    "criterio": "C2_DOC_1DIG_NOMBRE_SIM",
+                    "puntaje": round(puntaje, 4),
+                    "evidencia": {
+                        "doc_diff_1dig": True,
+                        "sim_nombre": round(sim_nombre, 4),
+                    },
+                },
+            }
+
     cur.close()
     conn.close()
-    
-    return result[0] if result else None
+
+    return mejor_coincidencia
 
 def buscar_empresa_existente(tipo_documento: str, numero_documento: str) -> Optional[str]:
     """Busca si una empresa ya existe en la base de datos"""

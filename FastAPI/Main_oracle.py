@@ -1,7 +1,8 @@
 import cx_Oracle
 import os
 import sys
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional
+from difflib import SequenceMatcher
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.oracle import VARCHAR2, NUMBER, DATE, TIMESTAMP, CLOB
 
@@ -75,12 +76,12 @@ def obtener_siguiente_consecutivo_personas() -> str:
 def obtener_siguiente_consecutivo_empresas() -> str:
     """Obtiene el siguiente consecutivo hexadecimal para empresas"""
     engine = get_oracle_connection()
-    
+
     with engine.connect() as conn:
         # Tomar el máximo sufijo HEX (8 chars) como cadena para evitar TO_NUMBER en SQL
         result = conn.execute(text("""
             SELECT NVL(MAX(SUBSTR(id_estadistico, 3)), '00000000')
-            FROM RRAA_DWH.control_ids_generados 
+            FROM RRAA_DWH.control_ids_generados
             WHERE tipo_entidad = '02'
               AND REGEXP_LIKE(SUBSTR(id_estadistico, 3), '^[0-9A-Fa-f]{8}$')
         """))
@@ -93,19 +94,174 @@ def obtener_siguiente_consecutivo_empresas() -> str:
     siguiente = base + 1
     return f"{siguiente:08X}"
 
-def buscar_persona_existente(tipo_documento: str, numero_documento: str) -> Optional[str]:
-    """Busca si una persona ya existe en la base de datos"""
+
+def _normalizar_cadena(valor: Optional[str]) -> str:
+    if valor is None:
+        return ""
+    return " ".join(str(valor).strip().upper().split())
+
+
+def _construir_nombre_completo(
+    primer_nombre: Optional[str],
+    segundo_nombre: Optional[str],
+    primer_apellido: Optional[str],
+    segundo_apellido: Optional[str],
+) -> str:
+    partes = [
+        _normalizar_cadena(primer_nombre),
+        _normalizar_cadena(segundo_nombre),
+        _normalizar_cadena(primer_apellido),
+        _normalizar_cadena(segundo_apellido),
+    ]
+    return " ".join([parte for parte in partes if parte])
+
+
+def _doc_diff_una_operacion(doc_a: str, doc_b: str) -> bool:
+    if doc_a is None or doc_b is None:
+        return False
+
+    if doc_a == doc_b:
+        return False
+
+    doc_a = doc_a.strip()
+    doc_b = doc_b.strip()
+
+    len_a = len(doc_a)
+    len_b = len(doc_b)
+
+    if abs(len_a - len_b) > 1:
+        return False
+
+    if len_a == len_b:
+        diferencias = [i for i in range(len_a) if doc_a[i] != doc_b[i]]
+        if len(diferencias) == 1:
+            return True
+        if len(diferencias) == 2:
+            i, j = diferencias
+            return j == i + 1 and doc_a[i] == doc_b[j] and doc_a[j] == doc_b[i]
+        return False
+
+    if len_a > len_b:
+        largo, corto = doc_a, doc_b
+    else:
+        largo, corto = doc_b, doc_a
+
+    i = j = 0
+    diferencia_encontrada = False
+    while i < len(largo) and j < len(corto):
+        if largo[i] != corto[j]:
+            if diferencia_encontrada:
+                return False
+            diferencia_encontrada = True
+            i += 1
+        else:
+            i += 1
+            j += 1
+
+    return True
+
+
+def _similitud_nombres(nombre_a: str, nombre_b: str) -> float:
+    if not nombre_a or not nombre_b:
+        return 0.0
+    return SequenceMatcher(None, nombre_a, nombre_b).ratio()
+
+
+def buscar_persona_existente(
+    tipo_documento: str,
+    numero_documento: str,
+    primer_nombre: Optional[str] = None,
+    segundo_nombre: Optional[str] = None,
+    primer_apellido: Optional[str] = None,
+    segundo_apellido: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Busca si una persona ya existe en la base de datos siguiendo los criterios de cruce C1 y C2."""
+
     engine = get_oracle_connection()
-    
+
     with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT id_estadistico 
-            FROM RRAA_DWH.control_ids_generados 
-            WHERE tipo_entidad = '01' AND tipo_documento = :tipo_doc AND numero_documento = :num_doc
-        """), {"tipo_doc": tipo_documento, "num_doc": numero_documento})
-        
+        result = conn.execute(
+            text(
+                """
+                SELECT id_estadistico
+                FROM RRAA_DWH.control_ids_generados
+                WHERE tipo_entidad = '01' AND tipo_documento = :tipo_doc AND numero_documento = :num_doc
+                """
+            ),
+            {"tipo_doc": tipo_documento, "num_doc": numero_documento},
+        )
+
         row = result.fetchone()
-        return row[0] if row else None
+        if row:
+            return {
+                "id_estadistico": row[0],
+                "coincidencia": {
+                    "criterio": "C1_DOC_EXACTO",
+                    "puntaje": 1.0,
+                    "evidencia": {
+                        "tipo_documento": tipo_documento,
+                        "numero_documento": numero_documento,
+                    },
+                },
+            }
+
+        nombre_solicitud = _construir_nombre_completo(
+            primer_nombre, segundo_nombre, primer_apellido, segundo_apellido
+        )
+
+        if not nombre_solicitud:
+            return None
+
+        candidatos = conn.execute(
+            text(
+                """
+                SELECT c.id_estadistico,
+                       c.numero_documento,
+                       NVL(p.primer_nombre, '') AS primer_nombre,
+                       NVL(p.segundo_nombre, '') AS segundo_nombre,
+                       NVL(p.primer_apellido, '') AS primer_apellido,
+                       NVL(p.segundo_apellido, '') AS segundo_apellido
+                FROM RRAA_DWH.control_ids_generados c
+                LEFT JOIN RRAA_DWH.raw_obt_personas p
+                  ON c.id_estadistico = p.id_estadistico
+                WHERE c.tipo_entidad = '01'
+                  AND c.tipo_documento = :tipo_doc
+            """
+            ),
+            {"tipo_doc": tipo_documento},
+        )
+
+        mejor_coincidencia: Optional[Dict[str, Any]] = None
+        mejor_puntaje = 0.0
+
+        for candidato in candidatos:
+            numero_doc_cand = candidato[1]
+            if not _doc_diff_una_operacion(str(numero_doc_cand or ""), str(numero_documento or "")):
+                continue
+
+            nombre_candidato = _construir_nombre_completo(
+                candidato[2], candidato[3], candidato[4], candidato[5]
+            )
+            sim_nombre = _similitud_nombres(nombre_solicitud, nombre_candidato)
+            if sim_nombre < 0.90:
+                continue
+
+            puntaje = 0.90 + 0.10 * sim_nombre
+            if puntaje > mejor_puntaje:
+                mejor_puntaje = puntaje
+                mejor_coincidencia = {
+                    "id_estadistico": candidato[0],
+                    "coincidencia": {
+                        "criterio": "C2_DOC_1DIG_NOMBRE_SIM",
+                        "puntaje": round(puntaje, 4),
+                        "evidencia": {
+                            "doc_diff_1dig": True,
+                            "sim_nombre": round(sim_nombre, 4),
+                        },
+                    },
+                }
+
+        return mejor_coincidencia
 
 def buscar_empresa_existente(tipo_documento: str, numero_documento: str) -> Optional[str]:
     """Busca si una empresa ya existe en la base de datos"""
