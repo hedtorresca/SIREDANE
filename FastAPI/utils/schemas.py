@@ -1,4 +1,4 @@
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, validator, Field
 from typing import Optional
 import datetime
 
@@ -7,17 +7,34 @@ import datetime
 
 # Schema para el servicio /generar-id-personas
 class PersonaRequest(BaseModel):
-    tipo_documento: str
-    numero_documento: str
-    primer_nombre: str
-    segundo_nombre: str
-    primer_apellido: str
-    segundo_apellido: str
-    fecha_nacimiento: datetime.date
-    sexo_an: str
-    codigo_municipio_nacimiento: str
-    codigo_pais_nacimiento: str
+    tipo_documento: str = Field(min_length=1, example="CC", description="Tipo de documento: CC, TI, CE, etc.")
+    numero_documento: str = Field(min_length=1, example="1234567890")
+    primer_nombre: str = Field(min_length=1, example="JUAN")
+    segundo_nombre: Optional[str] = ""
+    primer_apellido: str = Field(min_length=1, example="PEREZ")
+    segundo_apellido: Optional[str] = ""
+    fecha_nacimiento: datetime.date = Field(example="1990-01-15")
+    sexo_an: str = Field(min_length=1, example="M", description="Sexo: M o F")
+    codigo_municipio_nacimiento: str = Field(pattern=r'^\d+$', example="11001", description="DIVIPOLA de 5 dígitos")
+    codigo_pais_nacimiento: str = Field(pattern=r'^\d+$', example="170", description="Código M49 de 3 dígitos")
     fecha_defuncion: Optional[datetime.date] = None
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "tipo_documento": "CC",
+                "numero_documento": "1234567890",
+                "primer_nombre": "JUAN",
+                "segundo_nombre": "",
+                "primer_apellido": "PEREZ",
+                "segundo_apellido": "",
+                "fecha_nacimiento": "1990-01-15",
+                "sexo_an": "M",
+                "codigo_municipio_nacimiento": "11001",
+                "codigo_pais_nacimiento": "170",
+                "fecha_defuncion": None
+            }
+        }
 
 ## PENDIENTE - Validaciones de fechas, defuncion no puede ser anterior a la fecha de nacimiento
     @validator('fecha_nacimiento', 'fecha_defuncion', pre=True, always=True)
@@ -27,6 +44,61 @@ class PersonaRequest(BaseModel):
         if isinstance(v, str):
             return datetime.datetime.strptime(v, '%Y-%m-%d').date()
         return v
+
+    @validator('segundo_nombre', 'segundo_apellido', pre=True, always=True)
+    def optional_strings_to_empty(cls, v):
+        # Normaliza None a cadena vacía para campos opcionales
+        return "" if v is None else v
+
+    @validator('tipo_documento', 'numero_documento', 'primer_nombre', 'primer_apellido', pre=True)
+    def must_not_be_placeholder(cls, v):
+        # Rechazar valores de autollenado comunes
+        placeholders = {"string", "autodiligenciado", "auto", "null", "none"}
+        if isinstance(v, str) and v.strip().lower() in placeholders:
+            raise ValueError('valor inválido')
+        return v
+
+    @validator('sexo_an')
+    def validate_sexo(cls, v):
+        allowed = {"M", "F"}
+        if v.upper() not in allowed:
+            raise ValueError('sexo_an debe ser M o F')
+        return v.upper()
+
+    @validator('fecha_defuncion')
+    def validate_dates_order(cls, v, values):
+        # Si hay fecha de defunción, debe ser posterior o igual a fecha de nacimiento
+        if v is not None:
+            fnac = values.get('fecha_nacimiento')
+            if fnac is not None and v < fnac:
+                raise ValueError('fecha_defuncion no puede ser anterior a fecha_nacimiento')
+        return v
+
+    @validator('fecha_nacimiento')
+    def validate_birth_not_future(cls, v):
+        if v is not None:
+            today = datetime.date.today()
+            if v > today:
+                raise ValueError('fecha_nacimiento no puede ser futura')
+        return v
+
+    @validator('codigo_municipio_nacimiento')
+    def validate_codigo_municipio(cls, v):
+        s = v.strip()
+        if not s.isdigit():
+            raise ValueError('codigo_municipio_nacimiento debe ser numérico')
+        if len(s) != 5:
+            raise ValueError('codigo_municipio_nacimiento debe tener exactamente 5 dígitos (DIVIPOLA)')
+        return s
+
+    @validator('codigo_pais_nacimiento')
+    def validate_codigo_pais(cls, v):
+        s = v.strip()
+        if not s.isdigit():
+            raise ValueError('codigo_pais_nacimiento debe ser numérico')
+        if len(s) != 3:
+            raise ValueError('codigo_pais_nacimiento debe tener exactamente 3 dígitos (M49)')
+        return s
 
 # Schema para el servicio /generar-id-empresas
 class EmpresaRequest(BaseModel):
@@ -104,6 +176,23 @@ class EmpresaCCRequest(BaseModel):
             return v
         if isinstance(v, str):
             return datetime.datetime.strptime(v, '%Y-%m-%d').date()
+        return v
+
+    @validator('fecha_defuncion')
+    def validate_dates_order(cls, v, values):
+        # Si hay fecha de defunción, debe ser posterior o igual a fecha de nacimiento
+        if v is not None:
+            fnac = values.get('fecha_nacimiento')
+            if fnac is not None and v < fnac:
+                raise ValueError('fecha_defuncion no puede ser anterior a fecha_nacimiento')
+        return v
+
+    @validator('fecha_nacimiento')
+    def validate_birth_not_future(cls, v):
+        if v is not None:
+            today = datetime.date.today()
+            if v > today:
+                raise ValueError('fecha_nacimiento no puede ser futura')
         return v
 
 # Schema de respuesta común para todos los servicios
