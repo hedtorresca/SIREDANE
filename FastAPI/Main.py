@@ -168,7 +168,7 @@ def generar_id_empresas_cc(request: EmpresaCCRequest):
             guardar_empresa_con_id_persona(data_empresa, id_persona_existente)
 
             return IDResponse(
-                id_estadistico=id_persona_existente,
+                id_estadistico=id_persona_estadistico,
                 mensaje="Empresa registrada usando ID de persona existente",
                 tipo_entidad="01",
                 consecutivo=id_persona_existente[2:],
