@@ -25,14 +25,27 @@ def generar_id_personas(request: PersonaRequest):
     """
     try:
         # Buscar si la persona ya existe
-        id_existente = buscar_persona_existente(request.tipo_documento, request.numero_documento)
-        
+        id_existente = buscar_persona_existente(
+            request.tipo_documento,
+            request.numero_documento,
+            request.primer_nombre,
+            request.segundo_nombre,
+            request.primer_apellido,
+            request.segundo_apellido,
+        )
+
         if id_existente:
+            id_estadistico_existente = id_existente["id_estadistico"]
+            coincidencia = id_existente.get("coincidencia")
+            mensaje = "Persona ya existe en el sistema"
+            if coincidencia and coincidencia.get("criterio"):
+                mensaje += f" (criterio {coincidencia['criterio']})"
             return IDResponse(
-                id_estadistico=id_existente,
-                mensaje="Persona ya existe en el sistema",
+                id_estadistico=id_estadistico_existente,
+                mensaje=mensaje,
                 tipo_entidad="01",
-                consecutivo=id_existente[2:]  # Remover el prefijo "01"
+                consecutivo=id_estadistico_existente[2:],  # Remover el prefijo "01"
+                coincidencia=coincidencia,
             )
         
         # Si no existe, crear nueva persona
@@ -43,7 +56,8 @@ def generar_id_personas(request: PersonaRequest):
             id_estadistico=id_estadistico,
             mensaje="Nueva persona registrada exitosamente",
             tipo_entidad="01",
-            consecutivo=id_estadistico[2:]  # Remover el prefijo "01"
+            consecutivo=id_estadistico[2:],  # Remover el prefijo "01"
+            coincidencia=None,
         )
         
     except Exception as e:
@@ -113,9 +127,18 @@ def generar_id_empresas_cc(request: EmpresaCCRequest):
             )
         
         # Buscar si la persona existe
-        id_persona_existente = buscar_persona_existente(request.tipo_documento, request.numero_documento)
-        
+        id_persona_existente = buscar_persona_existente(
+            request.tipo_documento,
+            request.numero_documento,
+            request.primer_nombre,
+            request.segundo_nombre,
+            request.primer_apellido,
+            request.segundo_apellido,
+        )
+
         if id_persona_existente:
+            id_persona_estadistico = id_persona_existente["id_estadistico"]
+            coincidencia = id_persona_existente.get("coincidencia")
             # La persona existe, usar su ID para la empresa
             data_empresa = {
                 "razon_social": request.razon_social,
@@ -142,13 +165,14 @@ def generar_id_empresas_cc(request: EmpresaCCRequest):
                 "fecha_actualizacion": request.fecha_actualizacion
             }
             
-            guardar_empresa_con_id_persona(data_empresa, id_persona_existente)
-            
+            guardar_empresa_con_id_persona(data_empresa, id_persona_estadistico)
+
             return IDResponse(
-                id_estadistico=id_persona_existente,
+                id_estadistico=id_persona_estadistico,
                 mensaje="Empresa registrada usando ID de persona existente",
                 tipo_entidad="01",
-                consecutivo=id_persona_existente[2:]
+                consecutivo=id_persona_estadistico[2:],
+                coincidencia=coincidencia,
             )
         else:
             # La persona no existe, crear nueva persona y usar su ID para la empresa
@@ -200,7 +224,8 @@ def generar_id_empresas_cc(request: EmpresaCCRequest):
                 id_estadistico=id_estadistico,
                 mensaje="Nueva persona y empresa registradas exitosamente",
                 tipo_entidad="01",
-                consecutivo=id_estadistico[2:]
+                consecutivo=id_estadistico[2:],
+                coincidencia=None,
             )
         
     except HTTPException:
