@@ -56,20 +56,20 @@ def obtener_siguiente_consecutivo_personas() -> str:
     engine = get_oracle_connection()
     
     with engine.connect() as conn:
-        # Buscar el máximo ID estadístico de personas (que empieza con '01')
+        # Tomar el máximo sufijo HEX (8 chars) como cadena para evitar TO_NUMBER en SQL
         result = conn.execute(text("""
-            SELECT NVL(MAX(TO_NUMBER(SUBSTR(id_estadistico, 3))), 0)
+            SELECT NVL(MAX(SUBSTR(id_estadistico, 3)), '00000000')
             FROM RRAA_DWH.control_ids_generados 
             WHERE tipo_entidad = '01'
+              AND REGEXP_LIKE(SUBSTR(id_estadistico, 3), '^[0-9A-Fa-f]{8}$')
         """))
-        
-        max_consecutivo = result.scalar()
-    
-    if max_consecutivo is None or max_consecutivo == 0:
-        return "00000001"
-    
-    # Incrementar y convertir a hexadecimal de 8 dígitos
-    siguiente = max_consecutivo + 1
+        max_hex = result.scalar()
+
+    try:
+        base = int(str(max_hex), 16) if max_hex else 0
+    except Exception:
+        base = 0
+    siguiente = base + 1
     return f"{siguiente:08X}"
 
 def obtener_siguiente_consecutivo_empresas() -> str:
@@ -77,20 +77,20 @@ def obtener_siguiente_consecutivo_empresas() -> str:
     engine = get_oracle_connection()
     
     with engine.connect() as conn:
-        # Buscar el máximo ID estadístico de empresas (que empieza con '02')
+        # Tomar el máximo sufijo HEX (8 chars) como cadena para evitar TO_NUMBER en SQL
         result = conn.execute(text("""
-            SELECT NVL(MAX(TO_NUMBER(SUBSTR(id_estadistico, 3))), 0)
+            SELECT NVL(MAX(SUBSTR(id_estadistico, 3)), '00000000')
             FROM RRAA_DWH.control_ids_generados 
             WHERE tipo_entidad = '02'
+              AND REGEXP_LIKE(SUBSTR(id_estadistico, 3), '^[0-9A-Fa-f]{8}$')
         """))
-        
-        max_consecutivo = result.scalar()
-    
-    if max_consecutivo is None or max_consecutivo == 0:
-        return "00000001"
-    
-    # Incrementar y convertir a hexadecimal de 8 dígitos
-    siguiente = max_consecutivo + 1
+        max_hex = result.scalar()
+
+    try:
+        base = int(str(max_hex), 16) if max_hex else 0
+    except Exception:
+        base = 0
+    siguiente = base + 1
     return f"{siguiente:08X}"
 
 def buscar_persona_existente(tipo_documento: str, numero_documento: str) -> Optional[str]:
@@ -128,6 +128,54 @@ def guardar_nueva_persona(data: dict) -> str:
     consecutivo = obtener_siguiente_consecutivo_personas()
     id_estadistico = generar_id_estadistico("01", consecutivo)
     
+    # Normalización y saneamiento de entrada para evitar ORA-01722 (invalid number)
+    def _normalize_str(value):
+        v = None if value is None else str(value).strip()
+        return None if v == "" else v
+    def _normalize_int(value):
+        if value is None:
+            return None
+        s = str(value).strip()
+        if s == "":
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+    def _normalize_date(value):
+        if value is None:
+            return None
+        if hasattr(value, 'year') and hasattr(value, 'month') and hasattr(value, 'day'):
+            return value
+        try:
+            # admitir formatos comunes
+            import datetime as _dt
+            from datetime import datetime as _dtc
+            # intentar ISO o dd/mm/yyyy
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+                try:
+                    return _dtc.strptime(str(value).strip(), fmt).date()
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    tipo_doc_norm = _normalize_str(data.get("tipo_documento"))
+    num_doc_norm = _normalize_str(data.get("numero_documento"))
+    primer_nom_norm = _normalize_str(data.get("primer_nombre"))
+    segundo_nom_norm = _normalize_str(data.get("segundo_nombre"))
+    primer_ape_norm = _normalize_str(data.get("primer_apellido"))
+    segundo_ape_norm = _normalize_str(data.get("segundo_apellido"))
+    fecha_nac_norm = _normalize_date(data.get("fecha_nacimiento"))
+    sexo_norm = _normalize_str(data.get("sexo_an"))
+    cod_mun_norm = _normalize_int(data.get("codigo_municipio_nacimiento"))
+    cod_pais_norm = _normalize_int(data.get("codigo_pais_nacimiento"))
+
+    # Validaciones defensivas adicionales (además del esquema Pydantic)
+    if not tipo_doc_norm or not num_doc_norm:
+        raise ValueError("tipo_documento y numero_documento no pueden ser vacíos")
+
     with engine.begin() as conn:
         # Guardar en la tabla de control de IDs generados
         conn.execute(text("""
@@ -141,8 +189,8 @@ def guardar_nueva_persona(data: dict) -> str:
         """), {
             "id_est": id_estadistico,
             "tipo_ent": "01",
-            "tipo_doc": data["tipo_documento"],
-            "num_doc": data["numero_documento"]
+            "tipo_doc": tipo_doc_norm,
+            "num_doc": num_doc_norm
         })
         
         # Guardar en la tabla raw_obt_personas
@@ -158,16 +206,16 @@ def guardar_nueva_persona(data: dict) -> str:
             )
         """), {
             "id_est": id_estadistico,
-            "tipo_doc": data["tipo_documento"],
-            "num_doc": data["numero_documento"],
-            "primer_nom": data.get("primer_nombre"),
-            "segundo_nom": data.get("segundo_nombre"),
-            "primer_ape": data.get("primer_apellido"),
-            "segundo_ape": data.get("segundo_apellido"),
-            "fecha_nac": data.get("fecha_nacimiento"),
-            "sexo": data.get("sexo_an"),
-            "cod_mun": data.get("codigo_municipio_nacimiento"),
-            "cod_pais": data.get("codigo_pais_nacimiento")
+            "tipo_doc": tipo_doc_norm,
+            "num_doc": num_doc_norm,
+            "primer_nom": primer_nom_norm,
+            "segundo_nom": segundo_nom_norm,
+            "primer_ape": primer_ape_norm,
+            "segundo_ape": segundo_ape_norm,
+            "fecha_nac": fecha_nac_norm,
+            "sexo": sexo_norm,
+            "cod_mun": cod_mun_norm,
+            "cod_pais": cod_pais_norm
         })
     
     return id_estadistico
